@@ -1,0 +1,67 @@
+{
+  "enabled": {
+    "description": "启用 Emoji System",
+    "type": "bool",
+    "default": true
+  },
+  "capture_platforms": {
+    "description": "自动采集的平台适配器名称",
+    "type": "list",
+    "default": ["aiocqhttp"],
+    "hint": "第一版优先支持 OneBot/QQ。"
+  },
+  "allowed_sessions": {
+    "description": "允许自动采集的会话",
+    "type": "list",
+    "default": [],
+    "hint": "填写 unified_msg_origin；留空表示所有会话。"
+  },
+  "provider_id": {
+    "description": "用于描述、审核和选择表情的模型 Provider",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "留空时使用当前会话默认 Provider；建议选择支持图片输入的模型。"
+  },
+  "audit_enabled": {
+    "description": "启用 VLM 内容审核",
+    "type": "bool",
+    "default": true
+  },
+  "max_registered": {
+    "description": "最多可注册表情数量",
+    "type": "int",
+    "default": 200
+  },
+  "max_file_size_mb": {
+    "description": "自动采集最大文件大小（MB）",
+    "type": "float",
+    "default": 8.0
+  },
+  "min_width": {
+    "description": "自动采集最小宽度",
+    "type": "int",
+    "default": 48
+  },
+  "min_height": {
+    "description": "自动采集最小高度",
+    "type": "int",
+    "default": 48
+  },
+  "sample_size": {
+    "description": "每次选表情候选数量",
+    "type": "int",
+    "default": 20
+  },
+  "grid_columns": {
+    "description": "VLM 选图拼图列数",
+    "type": "int",
+    "default": 5
+  },
+  "maintenance_interval_minutes": {
+    "description": "维护任务间隔（分钟）",
+    "type": "int",
+    "default": 60
+  }
+}
+

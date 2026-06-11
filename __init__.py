@@ -1,0 +1,2 @@
+"""AstrBot plugin: Emoji System."""
+

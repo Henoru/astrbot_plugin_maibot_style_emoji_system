@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Emoji System</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Emoji System</h1>
+          <p id="stats">Loading...</p>
+        </div>
+        <div class="actions">
+          <label class="upload">
+            <input id="uploadInput" type="file" accept="image/*" />
+            上传
+          </label>
+          <button id="maintenanceBtn" type="button">维护</button>
+        </div>
+      </header>
+
+      <section class="filters">
+        <input id="searchInput" type="search" placeholder="搜索描述、标签或 Hash" />
+        <select id="statusSelect">
+          <option value="">全部</option>
+          <option value="adopted">已领养</option>
+          <option value="known">待领养</option>
+          <option value="unknown">未识别</option>
+          <option value="discarded">已禁用</option>
+        </select>
+      </section>
+
+      <section id="grid" class="grid" aria-live="polite"></section>
+    </main>
+
+    <dialog id="editor">
+      <form method="dialog" class="editor">
+        <img id="editorImage" alt="" />
+        <label>
+          描述
+          <textarea id="descriptionInput" rows="4"></textarea>
+        </label>
+        <label>
+          标签
+          <input id="tagsInput" type="text" placeholder="开心, 疑惑, 嘲讽" />
+        </label>
+        <div class="dialogActions">
+          <button id="saveBtn" type="button">保存</button>
+          <button id="closeBtn" type="button">关闭</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

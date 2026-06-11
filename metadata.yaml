@@ -1,0 +1,10 @@
+name: astrbot_plugin_maibot_style_emoji_system
+desc: MaiBot-style emoji system for AstrBot. Captures, describes, manages, and sends image emojis.
+version: 0.1.0
+author: AstrBot
+repo: "https://github.com/Henoru/astrbot_plugin_maibot_style_emoji_system"
+display_name: MaiBot Style Emoji System
+short_desc: 自动采集、描述、管理并按情绪发送表情包。
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.9.2"
