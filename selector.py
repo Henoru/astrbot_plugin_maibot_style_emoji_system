@@ -5,6 +5,7 @@ import random
 import re
 from pathlib import Path
 
+from astrbot.api import logger
 from PIL import Image as PILImage
 from PIL import ImageDraw, ImageFont
 
@@ -30,9 +31,18 @@ class EmojiSelector:
     ) -> EmojiRecord | None:
         candidates = self._rank(records, emotion, reason)
         if not candidates:
+            logger.info(
+                "MaiBotStyleEmojiSystem selector found no candidates: emotion=%s reason=%s",
+                emotion,
+                reason,
+            )
             return None
         sample = candidates[: max(sample_size, 1)]
         if len(sample) == 1:
+            logger.debug(
+                "MaiBotStyleEmojiSystem selector single candidate: emoji_id=%s",
+                sample[0].id,
+            )
             return sample[0]
 
         grid_path = self._build_grid(sample, grid_columns=max(grid_columns, 1))
@@ -45,7 +55,18 @@ class EmojiSelector:
         text = await self.model_service._generate(prompt, image_paths=[str(grid_path)], umo=umo)
         index = self._parse_index(text)
         if index is not None and 0 <= index < len(sample):
+            logger.info(
+                "MaiBotStyleEmojiSystem selector chose by model: emoji_id=%s index=%s sample_size=%s",
+                sample[index].id,
+                index + 1,
+                len(sample),
+            )
             return sample[index]
+        logger.info(
+            "MaiBotStyleEmojiSystem selector fallback first candidate: emoji_id=%s sample_size=%s",
+            sample[0].id,
+            len(sample),
+        )
         return sample[0]
 
     def _rank(self, records: list[EmojiRecord], emotion: str, reason: str) -> list[EmojiRecord]:
@@ -80,8 +101,13 @@ class EmojiSelector:
                     image = image.convert("RGBA")
                     image.thumbnail((cell - 16, cell - 16), PILImage.Resampling.LANCZOS)
                     canvas.paste(image, (x + 8, y + 8), image if image.mode == "RGBA" else None)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "MaiBotStyleEmojiSystem selector grid skipped image: emoji_id=%s path=%s error=%s",
+                    record.id,
+                    record.path,
+                    exc,
+                )
             draw.rectangle((x, y, x + 32, y + 24), fill="white", outline="black")
             draw.text((x + 6, y + 5), str(idx + 1), fill="black", font=font)
         path = self.data_dir / "emoji_selection_grid.jpg"
@@ -103,4 +129,3 @@ class EmojiSelector:
             pass
         match = re.search(r"\d+", cleaned)
         return int(match.group(0)) - 1 if match else None
-

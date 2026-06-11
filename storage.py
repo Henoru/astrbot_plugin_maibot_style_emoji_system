@@ -4,6 +4,7 @@ import hashlib
 import shutil
 from pathlib import Path
 
+from astrbot.api import logger
 from PIL import Image as PILImage
 
 from .models import EmojiRecord, utcnow_iso
@@ -45,6 +46,17 @@ class EmojiStorage:
         if not target.exists():
             shutil.copyfile(source, target)
             created = True
+            logger.debug(
+                "MaiBotStyleEmojiSystem storage copied image: source=%s target=%s",
+                source,
+                target,
+            )
+        else:
+            logger.debug(
+                "MaiBotStyleEmojiSystem storage reused image: source=%s target=%s",
+                source,
+                target,
+            )
         record = EmojiRecord(
             id=None,
             file_hash=file_hash,
@@ -85,6 +97,11 @@ class EmojiStorage:
     def ensure_thumbnail(self, record: EmojiRecord) -> Path:
         cache_path = self.thumbnail_path(record.file_hash)
         if cache_path.exists():
+            logger.debug(
+                "MaiBotStyleEmojiSystem storage reused thumbnail: emoji_id=%s path=%s",
+                record.id,
+                cache_path,
+            )
             return cache_path
         with PILImage.open(record.path) as image:
             if getattr(image, "n_frames", 1) > 1:
@@ -95,6 +112,11 @@ class EmojiStorage:
                 image = image.convert("RGB")
             image.thumbnail((200, 200), PILImage.Resampling.LANCZOS)
             image.save(cache_path, "WEBP", quality=80, method=6)
+        logger.debug(
+            "MaiBotStyleEmojiSystem storage created thumbnail: emoji_id=%s path=%s",
+            record.id,
+            cache_path,
+        )
         return cache_path
 
     def delete_files(self, record: EmojiRecord) -> None:
@@ -102,6 +124,14 @@ class EmojiStorage:
             try:
                 if path.is_file():
                     path.unlink()
+                    logger.debug(
+                        "MaiBotStyleEmojiSystem storage deleted file: emoji_id=%s path=%s",
+                        record.id,
+                        path,
+                    )
             except OSError:
-                pass
-
+                logger.warning(
+                    "MaiBotStyleEmojiSystem storage failed to delete file: emoji_id=%s path=%s",
+                    record.id,
+                    path,
+                )

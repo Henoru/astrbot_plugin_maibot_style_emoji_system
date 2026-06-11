@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from astrbot.api import logger
 from astrbot.api.star import Context
 
 from .models import EmojiRecord, normalize_tags
@@ -33,13 +34,29 @@ class EmojiModelService:
     ) -> str:
         provider_id = self._configured_provider_id(umo)
         if not provider_id:
+            logger.warning(
+                "MaiBotStyleEmojiSystem model skipped: no provider configured umo=%s",
+                umo,
+            )
             return ""
+        logger.debug(
+            "MaiBotStyleEmojiSystem model request: provider_id=%s images=%s umo=%s",
+            provider_id,
+            len(image_paths or []),
+            umo,
+        )
         response = await self.context.llm_generate(
             chat_provider_id=provider_id,
             prompt=prompt,
             image_urls=image_paths or [],
         )
-        return (response.completion_text or "").strip()
+        text = (response.completion_text or "").strip()
+        logger.debug(
+            "MaiBotStyleEmojiSystem model response: provider_id=%s chars=%s",
+            provider_id,
+            len(text),
+        )
+        return text
 
     async def audit_image(self, image_path: Path, *, umo: str = "") -> bool:
         prompt = (
@@ -49,8 +66,19 @@ class EmojiModelService:
         )
         text = await self._generate(prompt, image_paths=[str(image_path)], umo=umo)
         if not text:
+            logger.debug(
+                "MaiBotStyleEmojiSystem audit fallback pass: image=%s",
+                image_path,
+            )
             return True
-        return text.strip().startswith("是") or text.strip().lower().startswith("yes")
+        passed = text.strip().startswith("是") or text.strip().lower().startswith("yes")
+        logger.debug(
+            "MaiBotStyleEmojiSystem audit result: image=%s passed=%s response=%s",
+            image_path,
+            passed,
+            text[:80],
+        )
+        return passed
 
     async def describe_image(self, image_path: Path, *, umo: str = "") -> tuple[str, list[str]]:
         prompt = (
@@ -64,7 +92,17 @@ class EmojiModelService:
         if isinstance(data, dict):
             description = str(data.get("description") or "").strip()
             emotions = normalize_tags(data.get("emotions") if isinstance(data.get("emotions"), list) else data.get("emotion"))
+            logger.debug(
+                "MaiBotStyleEmojiSystem describe parsed: image=%s tags=%s",
+                image_path,
+                ",".join(emotions),
+            )
             return description or "未命名表情", emotions
+        logger.debug(
+            "MaiBotStyleEmojiSystem describe fallback: image=%s response=%s",
+            image_path,
+            text[:80],
+        )
         return (text[:120] or "未命名表情"), normalize_tags(text)
 
     async def choose_replacement(
@@ -94,12 +132,27 @@ class EmojiModelService:
             except (TypeError, ValueError):
                 return None
             if 0 <= index < len(existing):
+                logger.info(
+                    "MaiBotStyleEmojiSystem replacement selected by model: new_id=%s replace_id=%s",
+                    new_record.id,
+                    existing[index].id,
+                )
                 return existing[index]
         match = re.search(r"取消注册编号\s*(\d+)", text)
         if match:
             index = int(match.group(1)) - 1
             if 0 <= index < len(existing):
+                logger.info(
+                    "MaiBotStyleEmojiSystem replacement selected by text fallback: new_id=%s replace_id=%s",
+                    new_record.id,
+                    existing[index].id,
+                )
                 return existing[index]
+        logger.info(
+            "MaiBotStyleEmojiSystem replacement not selected: new_id=%s existing_count=%s",
+            new_record.id,
+            len(existing),
+        )
         return None
 
     @staticmethod
@@ -120,4 +173,3 @@ class EmojiModelService:
                 except json.JSONDecodeError:
                     return None
         return None
-
