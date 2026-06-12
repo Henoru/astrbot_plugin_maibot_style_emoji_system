@@ -4,7 +4,12 @@ import json
 import sqlite3
 from pathlib import Path
 
-from .models import EmojiRecord, normalize_tags, utcnow_iso
+from .models import (
+    EmojiRecord,
+    normalize_description_document,
+    normalize_tags,
+    utcnow_iso,
+)
 
 
 class EmojiRepository:
@@ -29,6 +34,8 @@ class EmojiRepository:
                     path TEXT NOT NULL,
                     format TEXT NOT NULL,
                     description TEXT NOT NULL DEFAULT '',
+                    description_document TEXT NOT NULL DEFAULT '',
+                    description_document_updated_time TEXT,
                     emotion_tags_json TEXT NOT NULL DEFAULT '[]',
                     query_count INTEGER NOT NULL DEFAULT 0,
                     usage_count INTEGER NOT NULL DEFAULT 0,
@@ -62,6 +69,8 @@ class EmojiRepository:
         rows = conn.execute("PRAGMA table_info(emojis)").fetchall()
         existing = {row["name"] for row in rows}
         columns = {
+            "description_document": "TEXT NOT NULL DEFAULT ''",
+            "description_document_updated_time": "TEXT",
             "embedding_text": "TEXT NOT NULL DEFAULT ''",
             "embedding_provider_id": "TEXT NOT NULL DEFAULT ''",
             "embedding_model": "TEXT NOT NULL DEFAULT ''",
@@ -92,6 +101,8 @@ class EmojiRepository:
             path=row["path"],
             format=row["format"],
             description=row["description"] or "",
+            description_document=normalize_description_document(row["description_document"] or ""),
+            description_document_updated_time=row["description_document_updated_time"],
             emotion_tags=normalize_tags(tags),
             query_count=int(row["query_count"] or 0),
             usage_count=int(row["usage_count"] or 0),
@@ -114,6 +125,10 @@ class EmojiRepository:
     def upsert(self, record: EmojiRecord) -> EmojiRecord:
         tags_json = json.dumps(normalize_tags(record.emotion_tags or []), ensure_ascii=False)
         vector_json = json.dumps(record.embedding_vector or [], ensure_ascii=False)
+        document = normalize_description_document(record.description_document)
+        document_updated_time = record.description_document_updated_time
+        if document and not document_updated_time:
+            document_updated_time = utcnow_iso()
         now = record.record_time or utcnow_iso()
         register_time = record.register_time
         if record.is_registered and not register_time:
@@ -122,18 +137,21 @@ class EmojiRepository:
             conn.execute(
                 """
                 INSERT INTO emojis (
-                    file_hash, file_name, path, format, description, emotion_tags_json,
-                    query_count, usage_count, is_registered, is_banned, source_platform,
-                    source_session, source_message_id, record_time, register_time,
-                    last_used_time, embedding_text, embedding_provider_id,
-                    embedding_model, embedding_dim, embedding_vector_json,
-                    embedding_updated_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    file_hash, file_name, path, format, description,
+                    description_document, description_document_updated_time,
+                    emotion_tags_json, query_count, usage_count, is_registered,
+                    is_banned, source_platform, source_session, source_message_id,
+                    record_time, register_time, last_used_time, embedding_text,
+                    embedding_provider_id, embedding_model, embedding_dim,
+                    embedding_vector_json, embedding_updated_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(file_hash) DO UPDATE SET
                     file_name=excluded.file_name,
                     path=excluded.path,
                     format=excluded.format,
                     description=excluded.description,
+                    description_document=excluded.description_document,
+                    description_document_updated_time=excluded.description_document_updated_time,
                     emotion_tags_json=excluded.emotion_tags_json,
                     is_registered=excluded.is_registered,
                     is_banned=excluded.is_banned,
@@ -154,6 +172,8 @@ class EmojiRepository:
                     record.path,
                     record.format,
                     record.description,
+                    document,
+                    document_updated_time,
                     tags_json,
                     record.query_count,
                     record.usage_count,
@@ -207,13 +227,22 @@ class EmojiRepository:
         elif status == "discarded":
             clauses.append("is_banned = 1")
         elif status == "known":
-            clauses.append("is_registered = 0 AND is_banned = 0 AND TRIM(description) <> ''")
+            clauses.append(
+                "is_registered = 0 AND is_banned = 0 "
+                "AND (TRIM(description) <> '' OR TRIM(description_document) <> '')"
+            )
         elif status == "unknown":
-            clauses.append("is_registered = 0 AND is_banned = 0 AND TRIM(description) = ''")
+            clauses.append(
+                "is_registered = 0 AND is_banned = 0 "
+                "AND TRIM(description) = '' AND TRIM(description_document) = ''"
+            )
         if query:
-            clauses.append("(description LIKE ? OR emotion_tags_json LIKE ? OR file_hash LIKE ?)")
+            clauses.append(
+                "(description LIKE ? OR description_document LIKE ? "
+                "OR emotion_tags_json LIKE ? OR file_hash LIKE ?)"
+            )
             q = f"%{query}%"
-            params.extend([q, q, q])
+            params.extend([q, q, q, q])
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
@@ -255,16 +284,27 @@ class EmojiRepository:
         emoji_id: int,
         *,
         description: str | None = None,
+        description_document: str | None = None,
         emotion_tags: list[str] | None = None,
         is_registered: bool | None = None,
         is_banned: bool | None = None,
     ) -> EmojiRecord | None:
         fields: list[str] = []
         params: list[object] = []
-        invalidates_embedding = description is not None or emotion_tags is not None
+        invalidates_embedding = (
+            description is not None
+            or description_document is not None
+            or emotion_tags is not None
+        )
         if description is not None:
             fields.append("description = ?")
             params.append(description)
+        if description_document is not None:
+            document = normalize_description_document(description_document)
+            fields.append("description_document = ?")
+            params.append(document)
+            fields.append("description_document_updated_time = ?")
+            params.append(utcnow_iso() if document else None)
         if emotion_tags is not None:
             fields.append("emotion_tags_json = ?")
             params.append(json.dumps(normalize_tags(emotion_tags), ensure_ascii=False))
@@ -324,6 +364,54 @@ class EmojiRepository:
                     len(vector),
                     json.dumps(vector, ensure_ascii=False),
                     utcnow_iso(),
+                    emoji_id,
+                ),
+            )
+        return self.get_by_id(emoji_id)
+
+    def update_description_document_with_embedding(
+        self,
+        emoji_id: int,
+        *,
+        description: str,
+        description_document: str,
+        emotion_tags: list[str],
+        embedding_text: str,
+        provider_id: str,
+        model: str,
+        vector: list[float],
+    ) -> EmojiRecord | None:
+        document = normalize_description_document(description_document)
+        tags_json = json.dumps(normalize_tags(emotion_tags), ensure_ascii=False)
+        vector = [float(item) for item in vector]
+        now = utcnow_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE emojis
+                SET description = ?,
+                    description_document = ?,
+                    description_document_updated_time = ?,
+                    emotion_tags_json = ?,
+                    embedding_text = ?,
+                    embedding_provider_id = ?,
+                    embedding_model = ?,
+                    embedding_dim = ?,
+                    embedding_vector_json = ?,
+                    embedding_updated_time = ?
+                WHERE id = ?
+                """,
+                (
+                    description,
+                    document,
+                    now,
+                    tags_json,
+                    embedding_text,
+                    provider_id,
+                    model,
+                    len(vector),
+                    json.dumps(vector, ensure_ascii=False),
+                    now,
                     emoji_id,
                 ),
             )

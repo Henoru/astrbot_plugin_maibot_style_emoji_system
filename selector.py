@@ -9,7 +9,7 @@ from pathlib import Path
 from astrbot.api import logger
 
 from .model_service import EmojiModelService
-from .models import EmojiRecord, normalize_tags
+from .models import EmojiRecord, normalize_description_document, normalize_tags
 from .repository import EmojiRepository
 
 
@@ -197,7 +197,13 @@ class EmojiSelector:
             return shuffled
 
         def score(record: EmojiRecord) -> tuple[int, int, int]:
-            text = f"{record.description} {' '.join(record.emotion_tags or [])}".lower()
+            text = " ".join(
+                [
+                    record.description_document,
+                    record.description,
+                    " ".join(record.emotion_tags or []),
+                ]
+            ).lower()
             exact = 10 if emotion and emotion.lower() in text else 0
             overlap = sum(1 for token in re.split(r"\s+", query) if token and token in text)
             usage_penalty = -int(record.usage_count)
@@ -215,15 +221,16 @@ class EmojiSelector:
         for idx, (record, score) in enumerate(candidates, 1):
             tags = ", ".join(normalize_tags(record.emotion_tags or [])) or "无"
             similarity = "未知" if score is None else f"{score:.3f}"
+            description = record.description_document or record.description or "未描述"
             lines.append(
-                f"{idx}. ID #{record.id}；描述：{self._clip(record.description or '未描述')}；"
+                f"{idx}. ID #{record.id}；描述文档：{self._clip(description)}；"
                 f"标签：{tags}；使用次数：{record.usage_count}；相似度：{similarity}"
             )
         return (
             "你需要根据上下文和当前语气选择一个合适的表情包来发送。\n"
             f"目标情绪：{emotion or '未指定'}\n"
             f"理由：{reason or '未指定'}\n"
-            "下面只提供候选表情包的文字描述、标签、使用次数和相似度。\n"
+            "下面只提供候选表情包的文字描述文档、标签、使用次数和相似度。\n"
             "候选表情：\n"
             + "\n".join(lines)
             + "\n请只回答 JSON：{\"emoji_index\":1,\"reason\":\"简短理由\"}。"
@@ -235,8 +242,24 @@ class EmojiSelector:
 
     @staticmethod
     def _record_embedding_text(record: EmojiRecord) -> str:
-        description = record.description.strip() or "未描述"
-        tags = ", ".join(normalize_tags(record.emotion_tags or [])) or "无"
+        return EmojiSelector.build_record_embedding_text(
+            description_document=record.description_document,
+            description=record.description,
+            emotion_tags=record.emotion_tags or [],
+        )
+
+    @staticmethod
+    def build_record_embedding_text(
+        *,
+        description_document: str,
+        description: str,
+        emotion_tags: list[str],
+    ) -> str:
+        document = normalize_description_document(description_document)
+        tags = ", ".join(normalize_tags(emotion_tags or [])) or "无"
+        if document:
+            return f"描述文档: {document}\n标签: {tags}"
+        description = description.strip() or "未描述"
         return f"描述: {description}\n标签: {tags}"
 
     @staticmethod

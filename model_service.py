@@ -9,7 +9,12 @@ from astrbot.api import logger
 from astrbot.api.star import Context
 from astrbot.core.provider.provider import EmbeddingProvider
 
-from .models import EmojiRecord, normalize_tags
+from .models import (
+    DESCRIPTION_DOCUMENT_MAX_LENGTH,
+    EmojiRecord,
+    normalize_description_document,
+    normalize_tags,
+)
 
 
 class EmojiModelService:
@@ -190,10 +195,16 @@ class EmojiModelService:
         )
         return passed
 
-    async def describe_image(self, image_path: Path, *, umo: str = "") -> tuple[str, list[str]]:
+    async def describe_image(
+        self,
+        image_path: Path,
+        *,
+        umo: str = "",
+    ) -> tuple[str, list[str], str]:
         prompt = (
             "请为这个表情包生成 JSON，不要输出 JSON 之外的内容。"
-            "格式：{\"description\":\"一句话描述画面和用途\","
+            "格式：{\"description\":\"一句话概括画面和用途\","
+            "\"document\":\"不超过1000字的表情描述文档，必须包含画面字面描述和使用场景推测\","
             "\"emotions\":[\"开心\",\"疑惑\"]}。"
             "emotions 给出 1 到 5 个中文情绪或语境标签。"
         )
@@ -207,18 +218,107 @@ class EmojiModelService:
                 else data.get("emotion")
             )
             emotions = normalize_tags(emotion_data)
+            document = normalize_description_document(data.get("document") or "")
+            if not document:
+                document = self.fallback_description_document(description, emotions)
             logger.debug(
-                "MaiBotStyleEmojiSystem describe parsed: image=%s tags=%s",
+                "MaiBotStyleEmojiSystem describe parsed: image=%s tags=%s document_chars=%s",
                 image_path,
                 ",".join(emotions),
+                len(document),
             )
-            return description or "未命名表情", emotions
+            return description or "未命名表情", emotions, document
         logger.debug(
             "MaiBotStyleEmojiSystem describe fallback: image=%s response=%s",
             image_path,
             text[:80],
         )
-        return (text[:120] or "未命名表情"), normalize_tags(text)
+        description = text[:120] or "未命名表情"
+        emotions = normalize_tags(text)
+        return description, emotions, self.fallback_description_document(description, emotions)
+
+    async def update_description_document(
+        self,
+        record: EmojiRecord,
+        *,
+        context: str,
+        reason: str = "",
+        umo: str = "",
+    ) -> dict[str, object] | None:
+        existing_document = record.description_document.strip() or self.fallback_description_document(
+            record.description,
+            record.emotion_tags or [],
+        )
+        prompt = (
+            "你是聊天机器人表情包语义档案维护工具。请观察图片，并根据本次聊天上下文判断是否需要更新该表情的描述文档。\n"
+            "文档最长1000字，必须同时包含：1. 画面字面描述；2. 适合发送的上下文、情绪、语气或互动场景推测。\n"
+            "如果上下文没有提供新的稳定信息，action 使用 none；如果只需补充细节，action 使用 merge；如果旧文档明显不准，action 使用 rewrite。\n"
+            "只输出 JSON，不要输出解释。格式："
+            "{\"action\":\"none|merge|rewrite\",\"document\":\"...\","
+            "\"description\":\"一句话短描述\",\"emotions\":[\"标签\"]}\n"
+            f"已有短描述：{record.description or '无'}\n"
+            f"已有标签：{', '.join(record.emotion_tags or []) or '无'}\n"
+            f"已有文档：{existing_document or '无'}\n"
+            f"本次上下文：{context.strip() or '无'}\n"
+            f"更新理由：{reason.strip() or '无'}\n"
+            f"再次强调：document 字符数必须小于等于 {DESCRIPTION_DOCUMENT_MAX_LENGTH}。"
+        )
+        text = await self._generate(prompt, image_paths=[record.path], umo=umo)
+        data = self._extract_json(text)
+        if not isinstance(data, dict):
+            logger.warning(
+                "MaiBotStyleEmojiSystem document update parse failed: emoji_id=%s response=%s",
+                record.id,
+                text[:120],
+            )
+            return None
+
+        action = str(data.get("action") or "").strip().lower()
+        if action not in {"none", "merge", "rewrite"}:
+            action = "merge" if str(data.get("document") or "").strip() else "none"
+        if action == "none":
+            logger.info(
+                "MaiBotStyleEmojiSystem document update skipped by model: emoji_id=%s",
+                record.id,
+            )
+            return {
+                "action": "none",
+                "description": record.description,
+                "document": record.description_document,
+                "emotions": normalize_tags(record.emotion_tags or []),
+            }
+
+        document = normalize_description_document(data.get("document") or "")
+        if not document:
+            document = existing_document
+        if not document:
+            return None
+
+        description = str(data.get("description") or record.description or "").strip()
+        if not description:
+            description = self._summarize_document(document)
+        if len(description) > 160:
+            description = description[:160].rstrip()
+
+        emotion_data = (
+            data.get("emotions")
+            if isinstance(data.get("emotions"), list)
+            else data.get("emotion")
+        )
+        emotions = normalize_tags(emotion_data or record.emotion_tags or [])
+        logger.info(
+            "MaiBotStyleEmojiSystem document update generated: emoji_id=%s action=%s chars=%s tags=%s",
+            record.id,
+            action,
+            len(document),
+            ",".join(emotions),
+        )
+        return {
+            "action": action,
+            "description": description or "未命名表情",
+            "document": document,
+            "emotions": emotions,
+        }
 
     async def choose_replacement(
         self,
@@ -229,14 +329,15 @@ class EmojiModelService:
         umo: str = "",
     ) -> EmojiRecord | None:
         lines = [
-            f"{idx}. {emoji.description or '无描述'} "
+            f"{idx}. {self._clip(emoji.description_document or emoji.description or '无描述')} "
             f"标签:{','.join(emoji.emotion_tags or [])} "
             f"使用:{emoji.usage_count}"
             for idx, emoji in enumerate(existing, 1)
         ]
         prompt = (
             f"可发送表情包数量已满({len(existing)}/{max_registered})，需要决定是否取消注册一个旧表情包。"
-            f"\n新表情描述：{new_record.description}\n新表情标签：{','.join(new_record.emotion_tags or [])}"
+            f"\n新表情描述：{new_record.description_document or new_record.description}"
+            f"\n新表情标签：{','.join(new_record.emotion_tags or [])}"
             "\n现有表情：\n"
             + "\n".join(lines)
             + "\n请只回答 JSON：{\"replace\":true,\"index\":1} 或 {\"replace\":false}。"
@@ -272,6 +373,34 @@ class EmojiModelService:
             len(existing),
         )
         return None
+
+    @staticmethod
+    def fallback_description_document(description: str, tags: list[str] | None) -> str:
+        description = " ".join((description or "").split())
+        tags = normalize_tags(tags or [])
+        parts: list[str] = []
+        if description:
+            parts.append(f"画面描述：{description}")
+        if tags:
+            parts.append(f"情绪标签：{', '.join(tags)}")
+            parts.append(f"使用场景推测：适合在表达{', '.join(tags)}等语气或回应相近聊天氛围时使用。")
+        elif description:
+            parts.append("使用场景推测：适合在聊天中回应与画面氛围相近的场景。")
+        return normalize_description_document("\n".join(parts))
+
+    @staticmethod
+    def _summarize_document(document: str) -> str:
+        first_line = next((line.strip() for line in document.splitlines() if line.strip()), "")
+        if first_line.startswith("画面描述："):
+            first_line = first_line.removeprefix("画面描述：")
+        return first_line[:120] or "未命名表情"
+
+    @staticmethod
+    def _clip(value: str, limit: int = 120) -> str:
+        value = " ".join(value.split())
+        if len(value) <= limit:
+            return value
+        return value[: limit - 1] + "…"
 
     @staticmethod
     def _extract_json(text: str) -> object | None:

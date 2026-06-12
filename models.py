@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 EmojiStatus = Literal["known", "unknown", "adopted", "discarded"]
+DESCRIPTION_DOCUMENT_MAX_LENGTH = 1000
 
 
 def utcnow_iso() -> str:
@@ -36,6 +37,13 @@ def normalize_tags(raw: str | list[str] | None) -> list[str]:
     return result
 
 
+def normalize_description_document(raw: object | None) -> str:
+    text = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(text) <= DESCRIPTION_DOCUMENT_MAX_LENGTH:
+        return text
+    return text[:DESCRIPTION_DOCUMENT_MAX_LENGTH].rstrip()
+
+
 @dataclass(slots=True)
 class EmojiRecord:
     id: int | None
@@ -44,6 +52,8 @@ class EmojiRecord:
     path: str
     format: str
     description: str = ""
+    description_document: str = ""
+    description_document_updated_time: str | None = None
     emotion_tags: list[str] | None = None
     query_count: int = 0
     usage_count: int = 0
@@ -68,7 +78,7 @@ class EmojiRecord:
             return "discarded"
         if self.is_registered:
             return "adopted"
-        if self.description.strip():
+        if self.description.strip() or self.description_document.strip():
             return "known"
         return "unknown"
 
@@ -84,6 +94,8 @@ class EmojiRecord:
             "path": self.path,
             "format": self.format,
             "description": self.description,
+            "description_document": self.description_document,
+            "description_document_updated_time": self.description_document_updated_time,
             "emotion_tags": normalize_tags(self.emotion_tags or []),
             "query_count": self.query_count,
             "usage_count": self.usage_count,

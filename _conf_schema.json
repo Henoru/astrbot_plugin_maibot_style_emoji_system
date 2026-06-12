@@ -19,11 +19,11 @@
     "hint": "填写 unified_msg_origin；留空表示所有会话。"
   },
   "provider_id": {
-    "description": "用于描述、审核和选择表情的模型 Provider",
+    "description": "用于描述、审核和更新表情文档的模型 Provider",
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "hint": "留空时使用当前会话默认 Provider；建议选择支持图片输入的模型。"
+    "hint": "留空时使用当前会话默认 Provider；审核、初始描述和文档更新建议选择支持图片输入的模型。"
   },
   "selector_provider_id": {
     "description": "用于发送时按描述选择表情的文本 LLM Provider",
@@ -36,7 +36,7 @@
     "description": "用于发送时初筛表情描述的 Embedding Provider ID",
     "type": "string",
     "default": "",
-    "hint": "填写 embedding 类型 Provider 的 ID；留空则使用文本规则初筛。"
+    "hint": "填写 embedding 类型 Provider 的 ID；描述文档工具保存时需要它同步刷新向量，留空则发送选择使用文本规则初筛。"
   },
   "audit_enabled": {
     "description": "启用 VLM 内容审核",

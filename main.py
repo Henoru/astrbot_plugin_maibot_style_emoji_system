@@ -15,7 +15,12 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 from quart import jsonify, request, send_file
 
 from .model_service import EmojiModelService
-from .models import EmojiRecord, utcnow_iso
+from .models import (
+    EmojiRecord,
+    normalize_description_document,
+    normalize_tags,
+    utcnow_iso,
+)
 from .repository import EmojiRepository
 from .selector import EmojiSelector
 from .storage import EmojiStorage
@@ -129,10 +134,27 @@ class EmojiSystemPlugin(star.Star):
             event.set_result("没有找到匹配的表情。")
             return
         lines = [
-            f"#{record.id} {', '.join(record.emotion_tags) or '未标注'} - {record.description[:36]}"
+            f"#{record.id} {', '.join(record.emotion_tags) or '未标注'} - "
+            f"{(record.description or record.description_document)[:36]}"
             for record in records
         ]
         event.set_result("\n".join(lines))
+
+    @emoji.command("describe")
+    async def emoji_describe(self, event: AstrMessageEvent, emoji_id: int) -> None:
+        record = self.repo.get_by_id(emoji_id)
+        if not record:
+            event.set_result(f"未找到表情 #{emoji_id}。")
+            return
+        document = record.description_document or self.model.fallback_description_document(
+            record.description,
+            record.emotion_tags or [],
+        )
+        if not document:
+            event.set_result(f"表情 #{emoji_id} 暂无描述文档。")
+            return
+        tags = ", ".join(record.emotion_tags or []) or "无"
+        event.set_result(f"表情 #{emoji_id} 描述文档：\n{document}\n标签：{tags}")
 
     @emoji.command("stats")
     async def emoji_stats(self, event: AstrMessageEvent) -> None:
@@ -228,7 +250,103 @@ class EmojiSystemPlugin(star.Star):
             emotion,
             event.unified_msg_origin,
         )
-        return f"Sent emoji #{record.id}: {record.description}"
+        summary = record.description or record.description_document[:80]
+        return f"Sent emoji #{record.id}: {summary}"
+
+    @llm_tool("update_emoji_description")
+    async def update_emoji_description_tool(
+        self,
+        event: AstrMessageEvent,
+        emoji_id: int,
+        context: str,
+        reason: str = "",
+    ) -> str:
+        """Update one emoji description document using the image and conversation context.
+
+        Args:
+            emoji_id(int): The emoji record id to update.
+            context(string): The current conversation context or observed usage scene.
+            reason(string): Why this context should change the emoji description.
+        """
+        return await self._update_emoji_description_document(
+            emoji_id,
+            context=context,
+            reason=reason,
+            umo=event.unified_msg_origin,
+        )
+
+    async def _update_emoji_description_document(
+        self,
+        emoji_id: int,
+        *,
+        context: str,
+        reason: str = "",
+        umo: str = "",
+    ) -> str:
+        if not self._cfg_bool("enabled", True):
+            logger.info("MaiBotStyleEmojiSystem tool update description skipped: disabled.")
+            return "Emoji system is disabled."
+        record = self.repo.get_by_id(emoji_id)
+        if not record:
+            return f"Emoji #{emoji_id} was not found."
+        if record.is_banned:
+            return f"Emoji #{emoji_id} is banned and was not updated."
+
+        update = await self.model.update_description_document(
+            record,
+            context=context,
+            reason=reason,
+            umo=umo,
+        )
+        if not update:
+            return f"Failed to update emoji #{emoji_id}: VLM did not return usable JSON."
+        if update.get("action") == "none":
+            return f"Emoji #{emoji_id} description document did not need an update."
+
+        document = normalize_description_document(update.get("document"))
+        description = str(update.get("description") or record.description or "未命名表情").strip()
+        emotions = normalize_tags(update.get("emotions") if isinstance(update.get("emotions"), list) else record.emotion_tags or [])
+        if not document:
+            return f"Failed to update emoji #{emoji_id}: generated document was empty."
+
+        embedding_text = self.selector.build_record_embedding_text(
+            description_document=document,
+            description=description,
+            emotion_tags=emotions,
+        )
+        embedded = await self.model.embed_texts([embedding_text])
+        if embedded is None:
+            return (
+                f"Failed to update emoji #{emoji_id}: embedding provider is unavailable "
+                "or failed, so the document was not saved."
+            )
+        vectors, provider_id, model, _dim = embedded
+        if not vectors:
+            return f"Failed to update emoji #{emoji_id}: embedding provider returned no vector."
+
+        updated = self.repo.update_description_document_with_embedding(
+            emoji_id,
+            description=description,
+            description_document=document,
+            emotion_tags=emotions,
+            embedding_text=embedding_text,
+            provider_id=provider_id,
+            model=model,
+            vector=vectors[0],
+        )
+        if not updated:
+            return f"Failed to update emoji #{emoji_id}: record disappeared before saving."
+        logger.info(
+            "MaiBotStyleEmojiSystem tool update description saved: emoji_id=%s action=%s chars=%s dim=%s",
+            emoji_id,
+            update.get("action"),
+            len(updated.description_document),
+            updated.embedding_dim,
+        )
+        return (
+            f"Updated emoji #{emoji_id} description document "
+            f"({update.get('action')}, {len(updated.description_document)} chars)."
+        )
 
     async def _send_record(
         self,
@@ -281,6 +399,16 @@ class EmojiSystemPlugin(star.Star):
             existing = self.repo.get_by_hash(record.file_hash)
             if existing:
                 record.id = existing.id
+                record.description = existing.description
+                record.description_document = existing.description_document
+                record.description_document_updated_time = existing.description_document_updated_time
+                record.emotion_tags = existing.emotion_tags
+                record.embedding_text = existing.embedding_text
+                record.embedding_provider_id = existing.embedding_provider_id
+                record.embedding_model = existing.embedding_model
+                record.embedding_dim = existing.embedding_dim
+                record.embedding_vector = existing.embedding_vector
+                record.embedding_updated_time = existing.embedding_updated_time
                 if existing.is_banned or existing.is_registered:
                     logger.debug(
                         "MaiBotStyleEmojiSystem registration skipped duplicate: emoji_id=%s hash=%s status=%s",
@@ -329,15 +457,31 @@ class EmojiSystemPlugin(star.Star):
                     record.file_hash[:12],
                 )
 
-            if not record.description or not record.emotion_tags:
-                description, tags = await self.model.describe_image(Path(record.path))
+            if not record.description or not record.emotion_tags or not record.description_document:
+                description, tags, document = await self.model.describe_image(
+                    Path(record.path),
+                    umo=event.unified_msg_origin if event else "",
+                )
                 record.description = description or record.description
                 record.emotion_tags = tags or record.emotion_tags
+                record.description_document = document or record.description_document
+                if not record.description_document:
+                    record.description_document = self.model.fallback_description_document(
+                        record.description,
+                        record.emotion_tags or [],
+                    )
+                record.embedding_text = ""
+                record.embedding_provider_id = ""
+                record.embedding_model = ""
+                record.embedding_dim = 0
+                record.embedding_vector = []
+                record.embedding_updated_time = None
                 logger.info(
-                    "MaiBotStyleEmojiSystem described emoji: emoji_id=%s tags=%s description=%s",
+                    "MaiBotStyleEmojiSystem described emoji: emoji_id=%s tags=%s description=%s document_chars=%s",
                     record.id,
                     ",".join(record.emotion_tags or []),
                     record.description[:80],
+                    len(record.description_document),
                 )
 
             await self._adopt_record(record, force=force_registered)
@@ -523,6 +667,8 @@ class EmojiSystemPlugin(star.Star):
         updates: dict[str, Any] = {}
         if "description" in payload:
             updates["description"] = str(payload.get("description") or "")
+        if "description_document" in payload:
+            updates["description_document"] = str(payload.get("description_document") or "")
         if "emotion_tags" in payload:
             tags = payload.get("emotion_tags")
             if isinstance(tags, str):
@@ -630,6 +776,7 @@ class EmojiSystemPlugin(star.Star):
             [
                 "emoji random - 随机发送一个表情",
                 "emoji search <关键词> - 搜索表情",
+                "emoji describe <id> - 查询表情描述文档",
                 "emoji stats - 查看表情库状态",
                 "emoji adopt <id> - 领养表情",
                 "emoji ban <id> - 禁用表情",
