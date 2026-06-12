@@ -7,6 +7,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.star import Context
+from astrbot.core.provider.provider import EmbeddingProvider
 
 from .models import EmojiRecord, normalize_tags
 
@@ -16,14 +17,118 @@ class EmojiModelService:
         self.context = context
         self.config = config
 
+    def _cfg_str(self, key: str) -> str:
+        if not hasattr(self.config, "get"):
+            return ""
+        return str(self.config.get(key, "") or "").strip()
+
     def _configured_provider_id(self, umo: str = "") -> str:
-        provider_id = ""
-        if hasattr(self.config, "get"):
-            provider_id = str(self.config.get("provider_id", "") or "").strip()
+        provider_id = self._cfg_str("provider_id")
         if provider_id:
             return provider_id
         provider = self.context.get_using_provider(umo or None)
         return provider.meta().id if provider else ""
+
+    def _configured_selector_provider_id(self, umo: str = "") -> str:
+        provider_id = self._cfg_str("selector_provider_id")
+        if provider_id:
+            return provider_id
+        return self._configured_provider_id(umo)
+
+    def _configured_embedding_provider_id(self) -> str:
+        return self._cfg_str("embedding_provider_id")
+
+    def _embedding_provider_info(
+        self,
+    ) -> tuple[EmbeddingProvider, str, str, int] | None:
+        provider_id = self._configured_embedding_provider_id()
+        if not provider_id:
+            return None
+        provider = self.context.get_provider_by_id(provider_id)
+        if not isinstance(provider, EmbeddingProvider):
+            logger.warning(
+                "MaiBotStyleEmojiSystem embedding skipped: "
+                "provider_id=%s is not an EmbeddingProvider",
+                provider_id,
+            )
+            return None
+
+        model = ""
+        resolved_provider_id = provider_id
+        try:
+            meta = provider.meta()
+            resolved_provider_id = meta.id or provider_id
+            model = meta.model or ""
+        except Exception as exc:
+            logger.debug(
+                "MaiBotStyleEmojiSystem embedding provider meta fallback: provider_id=%s error=%s",
+                provider_id,
+                exc,
+            )
+        if not model:
+            model = provider.get_model() or str(
+                provider.provider_config.get("embedding_model", "") or ""
+            )
+        try:
+            dim = int(provider.get_dim())
+        except Exception as exc:
+            logger.debug(
+                "MaiBotStyleEmojiSystem embedding dim unavailable: provider_id=%s error=%s",
+                provider_id,
+                exc,
+            )
+            dim = 0
+        return provider, resolved_provider_id, model, dim
+
+    def embedding_signature(self) -> tuple[str, str, int] | None:
+        info = self._embedding_provider_info()
+        if not info:
+            return None
+        _, provider_id, model, dim = info
+        return provider_id, model, dim
+
+    async def embed_texts(
+        self,
+        texts: list[str],
+    ) -> tuple[list[list[float]], str, str, int] | None:
+        if not texts:
+            return [], "", "", 0
+        info = self._embedding_provider_info()
+        if not info:
+            return None
+        provider, provider_id, model, configured_dim = info
+        batch_size = max(1, int(self.config.get("embedding_batch_size", 32)))
+        vectors: list[list[float]] = []
+        try:
+            for start in range(0, len(texts), batch_size):
+                batch = texts[start : start + batch_size]
+                batch_vectors = await provider.get_embeddings(batch)
+                if len(batch_vectors) != len(batch):
+                    logger.warning(
+                        "MaiBotStyleEmojiSystem embedding skipped: "
+                        "provider_id=%s returned %s vectors for %s texts",
+                        provider_id,
+                        len(batch_vectors),
+                        len(batch),
+                    )
+                    return None
+                vectors.extend([[float(value) for value in vector] for vector in batch_vectors])
+        except Exception as exc:
+            logger.warning(
+                "MaiBotStyleEmojiSystem embedding failed: provider_id=%s texts=%s error=%s",
+                provider_id,
+                len(texts),
+                exc,
+            )
+            return None
+        dim = len(vectors[0]) if vectors else configured_dim
+        logger.debug(
+            "MaiBotStyleEmojiSystem embedding generated: provider_id=%s texts=%s dim=%s",
+            provider_id,
+            len(texts),
+            dim,
+        )
+        return vectors, provider_id, model, dim
 
     async def _generate(
         self,
@@ -31,8 +136,9 @@ class EmojiModelService:
         *,
         image_paths: list[str] | None = None,
         umo: str = "",
+        provider_id: str | None = None,
     ) -> str:
-        provider_id = self._configured_provider_id(umo)
+        provider_id = provider_id if provider_id is not None else self._configured_provider_id(umo)
         if not provider_id:
             logger.warning(
                 "MaiBotStyleEmojiSystem model skipped: no provider configured umo=%s",
@@ -57,6 +163,10 @@ class EmojiModelService:
             len(text),
         )
         return text
+
+    async def generate_selection(self, prompt: str, *, umo: str = "") -> str:
+        provider_id = self._configured_selector_provider_id(umo)
+        return await self._generate(prompt, umo=umo, provider_id=provider_id)
 
     async def audit_image(self, image_path: Path, *, umo: str = "") -> bool:
         prompt = (
@@ -91,7 +201,12 @@ class EmojiModelService:
         data = self._extract_json(text)
         if isinstance(data, dict):
             description = str(data.get("description") or "").strip()
-            emotions = normalize_tags(data.get("emotions") if isinstance(data.get("emotions"), list) else data.get("emotion"))
+            emotion_data = (
+                data.get("emotions")
+                if isinstance(data.get("emotions"), list)
+                else data.get("emotion")
+            )
+            emotions = normalize_tags(emotion_data)
             logger.debug(
                 "MaiBotStyleEmojiSystem describe parsed: image=%s tags=%s",
                 image_path,
@@ -114,7 +229,9 @@ class EmojiModelService:
         umo: str = "",
     ) -> EmojiRecord | None:
         lines = [
-            f"{idx}. {emoji.description or '无描述'} 标签:{','.join(emoji.emotion_tags or [])} 使用:{emoji.usage_count}"
+            f"{idx}. {emoji.description or '无描述'} "
+            f"标签:{','.join(emoji.emotion_tags or [])} "
+            f"使用:{emoji.usage_count}"
             for idx, emoji in enumerate(existing, 1)
         ]
         prompt = (
@@ -143,7 +260,8 @@ class EmojiModelService:
             index = int(match.group(1)) - 1
             if 0 <= index < len(existing):
                 logger.info(
-                    "MaiBotStyleEmojiSystem replacement selected by text fallback: new_id=%s replace_id=%s",
+                    "MaiBotStyleEmojiSystem replacement selected by text fallback: "
+                    "new_id=%s replace_id=%s",
                     new_record.id,
                     existing[index].id,
                 )

@@ -27,7 +27,7 @@ PLUGIN_NAME = "astrbot_plugin_maibot_style_emoji_system"
     PLUGIN_NAME,
     "AstrBot",
     "MaiBot-style emoji system for AstrBot.",
-    "0.1.0",
+    "0.2.0",
 )
 class EmojiSystemPlugin(star.Star):
     def __init__(self, context: star.Context, config: dict | None = None) -> None:
@@ -37,7 +37,7 @@ class EmojiSystemPlugin(star.Star):
         self.repo = EmojiRepository(self.data_dir / "emoji.db")
         self.storage = EmojiStorage(self.data_dir)
         self.model = EmojiModelService(context, self.config)
-        self.selector = EmojiSelector(self.model, self.data_dir)
+        self.selector = EmojiSelector(self.model, self.data_dir, self.repo)
         self._register_lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task | None = None
         self._register_web_apis()

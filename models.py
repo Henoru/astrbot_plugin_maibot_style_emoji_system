@@ -55,6 +55,12 @@ class EmojiRecord:
     record_time: str = ""
     register_time: str | None = None
     last_used_time: str | None = None
+    embedding_text: str = ""
+    embedding_provider_id: str = ""
+    embedding_model: str = ""
+    embedding_dim: int = 0
+    embedding_vector: list[float] | None = None
+    embedding_updated_time: str | None = None
 
     @property
     def status(self) -> EmojiStatus:
@@ -90,4 +96,8 @@ class EmojiRecord:
             "record_time": self.record_time,
             "register_time": self.register_time,
             "last_used_time": self.last_used_time,
+            "embedding_provider_id": self.embedding_provider_id,
+            "embedding_model": self.embedding_model,
+            "embedding_dim": self.embedding_dim,
+            "embedding_updated_time": self.embedding_updated_time,
         }

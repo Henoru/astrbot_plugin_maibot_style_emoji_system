@@ -39,12 +39,39 @@ class EmojiRepository:
                     source_message_id TEXT NOT NULL DEFAULT '',
                     record_time TEXT NOT NULL,
                     register_time TEXT,
-                    last_used_time TEXT
+                    last_used_time TEXT,
+                    embedding_text TEXT NOT NULL DEFAULT '',
+                    embedding_provider_id TEXT NOT NULL DEFAULT '',
+                    embedding_model TEXT NOT NULL DEFAULT '',
+                    embedding_dim INTEGER NOT NULL DEFAULT 0,
+                    embedding_vector_json TEXT NOT NULL DEFAULT '[]',
+                    embedding_updated_time TEXT
                 )
                 """
             )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_emojis_registered ON emojis(is_registered, is_banned)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_emojis_hash ON emojis(file_hash)")
+            self._ensure_embedding_columns(conn)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_emojis_registered "
+                "ON emojis(is_registered, is_banned)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_emojis_hash ON emojis(file_hash)"
+            )
+
+    def _ensure_embedding_columns(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute("PRAGMA table_info(emojis)").fetchall()
+        existing = {row["name"] for row in rows}
+        columns = {
+            "embedding_text": "TEXT NOT NULL DEFAULT ''",
+            "embedding_provider_id": "TEXT NOT NULL DEFAULT ''",
+            "embedding_model": "TEXT NOT NULL DEFAULT ''",
+            "embedding_dim": "INTEGER NOT NULL DEFAULT 0",
+            "embedding_vector_json": "TEXT NOT NULL DEFAULT '[]'",
+            "embedding_updated_time": "TEXT",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE emojis ADD COLUMN {name} {definition}")
 
     def _row_to_record(self, row: sqlite3.Row) -> EmojiRecord:
         tags_raw = row["emotion_tags_json"] or "[]"
@@ -52,6 +79,12 @@ class EmojiRepository:
             tags = json.loads(tags_raw)
         except json.JSONDecodeError:
             tags = []
+        vector_raw = row["embedding_vector_json"] or "[]"
+        try:
+            vector_data = json.loads(vector_raw)
+            embedding_vector = [float(item) for item in vector_data]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            embedding_vector = []
         return EmojiRecord(
             id=row["id"],
             file_hash=row["file_hash"],
@@ -70,10 +103,17 @@ class EmojiRepository:
             record_time=row["record_time"] or "",
             register_time=row["register_time"],
             last_used_time=row["last_used_time"],
+            embedding_text=row["embedding_text"] or "",
+            embedding_provider_id=row["embedding_provider_id"] or "",
+            embedding_model=row["embedding_model"] or "",
+            embedding_dim=int(row["embedding_dim"] or 0),
+            embedding_vector=embedding_vector,
+            embedding_updated_time=row["embedding_updated_time"],
         )
 
     def upsert(self, record: EmojiRecord) -> EmojiRecord:
         tags_json = json.dumps(normalize_tags(record.emotion_tags or []), ensure_ascii=False)
+        vector_json = json.dumps(record.embedding_vector or [], ensure_ascii=False)
         now = record.record_time or utcnow_iso()
         register_time = record.register_time
         if record.is_registered and not register_time:
@@ -85,8 +125,10 @@ class EmojiRepository:
                     file_hash, file_name, path, format, description, emotion_tags_json,
                     query_count, usage_count, is_registered, is_banned, source_platform,
                     source_session, source_message_id, record_time, register_time,
-                    last_used_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_used_time, embedding_text, embedding_provider_id,
+                    embedding_model, embedding_dim, embedding_vector_json,
+                    embedding_updated_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(file_hash) DO UPDATE SET
                     file_name=excluded.file_name,
                     path=excluded.path,
@@ -98,7 +140,13 @@ class EmojiRepository:
                     source_platform=excluded.source_platform,
                     source_session=excluded.source_session,
                     source_message_id=excluded.source_message_id,
-                    register_time=COALESCE(emojis.register_time, excluded.register_time)
+                    register_time=COALESCE(emojis.register_time, excluded.register_time),
+                    embedding_text=excluded.embedding_text,
+                    embedding_provider_id=excluded.embedding_provider_id,
+                    embedding_model=excluded.embedding_model,
+                    embedding_dim=excluded.embedding_dim,
+                    embedding_vector_json=excluded.embedding_vector_json,
+                    embedding_updated_time=excluded.embedding_updated_time
                 """,
                 (
                     record.file_hash,
@@ -117,6 +165,12 @@ class EmojiRepository:
                     now,
                     register_time,
                     record.last_used_time,
+                    record.embedding_text,
+                    record.embedding_provider_id,
+                    record.embedding_model,
+                    int(record.embedding_dim or 0),
+                    vector_json,
+                    record.embedding_updated_time,
                 ),
             )
         found = self.get_by_hash(record.file_hash)
@@ -126,12 +180,16 @@ class EmojiRepository:
 
     def get_by_hash(self, file_hash: str) -> EmojiRecord | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM emojis WHERE file_hash = ?", (file_hash,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM emojis WHERE file_hash = ?", (file_hash,)
+            ).fetchone()
         return self._row_to_record(row) if row else None
 
     def get_by_id(self, emoji_id: int) -> EmojiRecord | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM emojis WHERE id = ?", (emoji_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM emojis WHERE id = ?", (emoji_id,)
+            ).fetchone()
         return self._row_to_record(row) if row else None
 
     def list(
@@ -161,7 +219,9 @@ class EmojiRepository:
         page_size = min(max(page_size, 1), 200)
         offset = (page - 1) * page_size
         with self._connect() as conn:
-            total = int(conn.execute(f"SELECT COUNT(*) FROM emojis {where}", params).fetchone()[0])
+            total = int(
+                conn.execute(f"SELECT COUNT(*) FROM emojis {where}", params).fetchone()[0]
+            )
             rows = conn.execute(
                 f"SELECT * FROM emojis {where} ORDER BY id DESC LIMIT ? OFFSET ?",
                 [*params, page_size, offset],
@@ -171,7 +231,8 @@ class EmojiRepository:
     def registered(self) -> list[EmojiRecord]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM emojis WHERE is_registered = 1 AND is_banned = 0 ORDER BY usage_count ASC, id DESC"
+                "SELECT * FROM emojis WHERE is_registered = 1 AND is_banned = 0 "
+                "ORDER BY usage_count ASC, id DESC"
             ).fetchall()
         return [self._row_to_record(row) for row in rows]
 
@@ -200,12 +261,24 @@ class EmojiRepository:
     ) -> EmojiRecord | None:
         fields: list[str] = []
         params: list[object] = []
+        invalidates_embedding = description is not None or emotion_tags is not None
         if description is not None:
             fields.append("description = ?")
             params.append(description)
         if emotion_tags is not None:
             fields.append("emotion_tags_json = ?")
             params.append(json.dumps(normalize_tags(emotion_tags), ensure_ascii=False))
+        if invalidates_embedding:
+            fields.extend(
+                [
+                    "embedding_text = ''",
+                    "embedding_provider_id = ''",
+                    "embedding_model = ''",
+                    "embedding_dim = 0",
+                    "embedding_vector_json = '[]'",
+                    "embedding_updated_time = NULL",
+                ]
+            )
         if is_registered is not None:
             fields.append("is_registered = ?")
             params.append(int(is_registered))
@@ -220,6 +293,40 @@ class EmojiRepository:
         params.append(emoji_id)
         with self._connect() as conn:
             conn.execute(f"UPDATE emojis SET {', '.join(fields)} WHERE id = ?", params)
+        return self.get_by_id(emoji_id)
+
+    def update_embedding(
+        self,
+        emoji_id: int,
+        *,
+        embedding_text: str,
+        provider_id: str,
+        model: str,
+        vector: list[float],
+    ) -> EmojiRecord | None:
+        vector = [float(item) for item in vector]
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE emojis
+                SET embedding_text = ?,
+                    embedding_provider_id = ?,
+                    embedding_model = ?,
+                    embedding_dim = ?,
+                    embedding_vector_json = ?,
+                    embedding_updated_time = ?
+                WHERE id = ?
+                """,
+                (
+                    embedding_text,
+                    provider_id,
+                    model,
+                    len(vector),
+                    json.dumps(vector, ensure_ascii=False),
+                    utcnow_iso(),
+                    emoji_id,
+                ),
+            )
         return self.get_by_id(emoji_id)
 
     def delete(self, emoji_id: int) -> EmojiRecord | None:
@@ -255,4 +362,3 @@ class EmojiRepository:
             page += 1
             records, _ = self.list(page=page, page_size=200)
         return removed
-

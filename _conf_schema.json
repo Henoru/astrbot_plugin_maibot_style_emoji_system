@@ -7,7 +7,9 @@
   "capture_platforms": {
     "description": "自动采集的平台适配器名称",
     "type": "list",
-    "default": ["aiocqhttp"],
+    "default": [
+      "aiocqhttp"
+    ],
     "hint": "第一版优先支持 OneBot/QQ。"
   },
   "allowed_sessions": {
@@ -22,6 +24,19 @@
     "default": "",
     "_special": "select_provider",
     "hint": "留空时使用当前会话默认 Provider；建议选择支持图片输入的模型。"
+  },
+  "selector_provider_id": {
+    "description": "用于发送时按描述选择表情的文本 LLM Provider",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "留空时依次使用 provider_id 和当前会话默认 Provider。"
+  },
+  "embedding_provider_id": {
+    "description": "用于发送时初筛表情描述的 Embedding Provider ID",
+    "type": "string",
+    "default": "",
+    "hint": "填写 embedding 类型 Provider 的 ID；留空则使用文本规则初筛。"
   },
   "audit_enabled": {
     "description": "启用 VLM 内容审核",
@@ -54,9 +69,10 @@
     "default": 20
   },
   "grid_columns": {
-    "description": "VLM 选图拼图列数",
+    "description": "兼容旧配置，发送阶段不再使用 VLM 拼图列数",
     "type": "int",
-    "default": 5
+    "default": 5,
+    "hint": "当前 selector 使用文本描述选择，不再构建图片拼图。"
   },
   "maintenance_interval_minutes": {
     "description": "维护任务间隔（分钟）",
@@ -64,4 +80,3 @@
     "default": 60
   }
 }
-
